@@ -1,4 +1,10 @@
 {
+  "lib/diamond-proxy": {
+    "tag": {
+      "name": "v1.0.0",
+      "rev": "0b9b9ea89130e45fe8c22310f42f7705e605d54c"
+    }
+  },
   "lib/forge-std": {
     "tag": {
       "name": "v1.16.1",
