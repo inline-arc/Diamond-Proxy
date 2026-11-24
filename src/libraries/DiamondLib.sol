@@ -2,6 +2,7 @@
 pragma solidity ^0.8.26;
 
 import {IDiamondCut} from "../interfaces/IDiamondCut.sol";
+import {IOwnership} from "../interfaces/IOwnership.sol";
 
 
 /// @dev prefine any error which can occur 
@@ -39,6 +40,8 @@ library DiamondLib {
 
         /// @dev only owner can execute functions
         address contractOwner;
+        /// @dev proposed owner awaiting acceptOwnership
+        address pendingOwner;
     }
 
     /// @dev function to get the diamond storage position on chain ig with an bytes32 storage slot later to be optimized at storage level to resude gas fee a erc-165
@@ -49,19 +52,55 @@ library DiamondLib {
         }
     }
 
-    /// @dev ownership transfer when upgraded any proxy undeployed rn cosideres as event in IDiamondCut interface
-    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
-
-    /// @dev function to transfer ownership to a new address
+    /// @dev Propose a new owner. The nominee must call acceptOwnership.
     function transferOwnership(address newOwner) internal {
+        enforceIsContractOwner();
         DiamondStorage storage ds = diamondStorage();
+        ds.pendingOwner = newOwner;
+        emit IOwnership.OwnershipTransferStarted(ds.contractOwner, newOwner);
+    }
+
+    /// @dev Pending owner accepts and becomes contractOwner.
+    function acceptOwnership() internal {
+        DiamondStorage storage ds = diamondStorage();
+        address pending = ds.pendingOwner;
+        require(msg.sender == pending, "LibDiamond: caller is not pending owner");
         address oldOwner = ds.contractOwner;
+        ds.contractOwner = pending;
+        ds.pendingOwner = address(0);
+        emit IOwnership.OwnershipTransferred(oldOwner, pending);
+    }
+
+    /// @dev Current owner clears a pending transfer.
+    function cancelOwnershipTransfer() internal {
+        enforceIsContractOwner();
+        DiamondStorage storage ds = diamondStorage();
+        address pending = ds.pendingOwner;
+        require(pending != address(0), "LibDiamond: no pending owner");
+        ds.pendingOwner = address(0);
+        emit IOwnership.OwnershipTransferCanceled(pending);
+    }
+
+    /// @dev Set the contract owner. Used at initialization, before an owner exists.
+    function setContractOwner(address newOwner) internal {
+        DiamondStorage storage ds = diamondStorage();
+        address previousOwner = ds.contractOwner;
         ds.contractOwner = newOwner;
-        emit OwnershipTransferred(oldOwner, newOwner);
+        emit IOwnership.OwnershipTransferred(previousOwner, newOwner);
     }
 
     function contractOwner() internal view returns (address _contractOwner) {
-        _contractOwner = diamondStorage().contractOwner; /// @dev again define owner in diamond storage 
+        _contractOwner = diamondStorage().contractOwner;
+    }
+
+    /// @dev IOwnership.owner
+    function owner() internal view returns (address) {
+        return contractOwner();
+    }
+
+    /// @dev IOwnership.pendingOwner
+    function pendingOwner() internal view returns (address) {
+        return diamondStorage().pendingOwner;
     }
 
     /// @dev signup as to ownership of the contract
@@ -226,11 +265,11 @@ library DiamondLib {
             if (_init != address(this)) {
                 enforceHasContractCode(_init, "LibDiamond: _init address has no code");
             }
-            (bool success, bytes memory error) = _init.delegatecall(_calldata);
+            (bool success, bytes memory revertData) = _init.delegatecall(_calldata);
             if (!success) {
-                if (error.length > 0) {
-                    // bubble up the error
-                    revert(string(error));
+                if (revertData.length > 0) {
+                    // bubble up the revert data
+                    revert(string(revertData));
                 } else {
                     revert DiamondLib_InitializationFunctionReverted(_init, _calldata);
                 }
