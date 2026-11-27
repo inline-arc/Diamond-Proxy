@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
-import {BaseHook} from "@openzeppelin/uniswap-hooks/src/base/BaseHook.sol";
-import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
+import {BaseHook} from "@openzeppelin/uniswap-hooks/base/BaseHook.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {IPoolManager, SwapParams, ModifyLiquidityParams} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
@@ -10,8 +9,8 @@ import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {BeforeSwapDelta, BeforeSwapDeltaLibrary} from "@uniswap/v4-core/src/types/BeforeSwapDelta.sol";
 
-import {LibDiamond} from "../diamond/libraries/LibDiamond.sol";
-import {IDiamondCut} from "../diamond/interfaces/IDiamondCut.sol";
+import {DiamondLib} from "../../libraries/DiamondLib.sol";
+import {DiamondStorage} from "../../DiamondStorage.sol";
 
 /// @title HookDiamond
 /// @notice A Uniswap v4 hook that IS a diamond proxy, allowing modular hook logic via facets
