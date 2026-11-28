@@ -1,237 +1,102 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
-import {BaseHook} from "@openzeppelin/uniswap-hooks/base/BaseHook.sol";
-import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
-import {IPoolManager, SwapParams, ModifyLiquidityParams} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
-import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
+import {SwapParams, ModifyLiquidityParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
-import {BeforeSwapDelta, BeforeSwapDeltaLibrary} from "@uniswap/v4-core/src/types/BeforeSwapDelta.sol";
+import {BeforeSwapDelta} from "@uniswap/v4-core/src/types/BeforeSwapDelta.sol";
 
-import {DiamondLib} from "../../libraries/DiamondLib.sol";
-import {DiamondStorage} from "../../DiamondStorage.sol";
+/// @title Hook facet interfaces for HookDiamond
+/// @notice Each interface is ONE hook callback, with the exact IHooks signature.
+/// @dev HookDiamond._beforeSwap etc. look up a facet by IHooks.<hook>.selector and delegatecall it
+///      with abi.encodeWithSelector(selector, sender, key, params, ..., hookData).
+///      A selector depends only on the function name and parameter TYPES, so these must match
+///      IHooks exactly or the diamond will never find / call your facet.
+///
+///      Rules for every implementation:
+///      - delegatecall context: address(this) is the HookDiamond, msg.sender is the PoolManager.
+///      - NO state variables. Use a namespaced storage library (a fixed keccak256 slot, like DiamondLib).
+///      - Return the matching selector (IHooks.<hook>.selector) or the PoolManager reverts.
+///      - A facet only inherits the interfaces for hooks it actually registers via diamondCut.
+///        (Solidity forces you to implement everything you inherit, so don't inherit IHookFacet
+///        unless you really implement all six.)
 
-/// @title HookDiamond
-/// @notice A Uniswap v4 hook that IS a diamond proxy, allowing modular hook logic via facets
-/// @dev This hook combines BaseHook functionality with diamond proxy pattern
-/// Users can add facets to implement custom hook logic without modifying the hook itself
-contract HookDiamond is BaseHook {
-    using PoolIdLibrary for PoolKey;
+interface IBeforeSwapFacet {
+    /// @param sender   caller of PoolManager.swap, usually a router (NOT the end user)
+    /// @param key      pool key (currency0, currency1, fee, tickSpacing, hooks)
+    /// @param params   zeroForOne, amountSpecified (negative = exact input), sqrtPriceLimitX96
+    /// @param hookData arbitrary bytes passed in by the swapper
+    /// @return selector   must be IHooks.beforeSwap.selector
+    /// @return delta      adjustment to swap amounts (needs beforeSwapReturnDelta flag, else ZERO_DELTA)
+    /// @return lpFeeOverride  dynamic-fee override (0 = none; pool must be dynamic-fee)
+    function beforeSwap(address sender, PoolKey calldata key, SwapParams calldata params, bytes calldata hookData)
+        external
+        returns (bytes4 selector, BeforeSwapDelta delta, uint24 lpFeeOverride);
+}
 
-    /// @notice Error thrown when trying to call a function that doesn't exist
-    error FunctionNotFound(bytes4 selector);
-
-    constructor(IPoolManager _poolManager, address _contractOwner, address _diamondCutFacet) BaseHook(_poolManager) {
-        LibDiamond.setContractOwner(_contractOwner);
-
-        // Add the diamondCut external function from the diamondCutFacet
-        IDiamondCut.FacetCut[] memory cut = new IDiamondCut.FacetCut[](1);
-        bytes4[] memory functionSelectors = new bytes4[](1);
-        functionSelectors[0] = IDiamondCut.diamondCut.selector;
-        cut[0] = IDiamondCut.FacetCut({
-            facetAddress: _diamondCutFacet,
-            action: IDiamondCut.FacetCutAction.Add,
-            functionSelectors: functionSelectors
-        });
-        LibDiamond.diamondCut(cut, address(0), "");
-    }
-
-    function getHookPermissions() public pure override returns (Hooks.Permissions memory) {
-        return Hooks.Permissions({
-            beforeInitialize: false,
-            afterInitialize: false,
-            beforeAddLiquidity: true,
-            afterAddLiquidity: true,
-            beforeRemoveLiquidity: true,
-            afterRemoveLiquidity: true,
-            beforeSwap: true,
-            afterSwap: true,
-            beforeDonate: false,
-            afterDonate: false,
-            beforeSwapReturnDelta: false,
-            afterSwapReturnDelta: false,
-            afterAddLiquidityReturnDelta: false,
-            afterRemoveLiquidityReturnDelta: false
-        });
-    }
-
-    /// @notice Hook entry point - delegates to facet if exists, otherwise default behavior
-    function _beforeSwap(
-        address sender,
-        PoolKey calldata key,
-        SwapParams calldata params,
-        bytes calldata hookData
-    ) internal override returns (bytes4, BeforeSwapDelta, uint24) {
-        // Try to delegate to a facet that implements beforeSwap hook logic
-        // Use the external function selector from IHooks interface
-        bytes4 hookSelector = IHooks.beforeSwap.selector;
-        address facet = _getFacet(hookSelector);
-        
-        if (facet != address(0)) {
-            // Facet implements hook logic - delegatecall to it
-            (bool success, bytes memory returnData) = facet.delegatecall(
-                abi.encodeWithSelector(hookSelector, sender, key, params, hookData)
-            );
-            if (success && returnData.length > 0) {
-                (bytes4 returnSelector, BeforeSwapDelta delta, uint24 hookReturn) = abi.decode(returnData, (bytes4, BeforeSwapDelta, uint24));
-                return (returnSelector, delta, hookReturn);
-            }
-        }
-        
-        // Default behavior - no facet or facet returned empty
-        return (BaseHook.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
-    }
-
-    function _afterSwap(
+interface IAfterSwapFacet {
+    /// @param delta final swap result: positive = owed to the caller, negative = owed to the pool
+    /// @return selector   must be IHooks.afterSwap.selector
+    /// @return hookDeltaUnspecified  amount the hook claims (needs afterSwapReturnDelta flag, else 0)
+    function afterSwap(
         address sender,
         PoolKey calldata key,
         SwapParams calldata params,
         BalanceDelta delta,
         bytes calldata hookData
-    ) internal override returns (bytes4, int128) {
-        bytes4 hookSelector = IHooks.afterSwap.selector;
-        address facet = _getFacet(hookSelector);
-        
-        if (facet != address(0)) {
-            (bool success, bytes memory returnData) = facet.delegatecall(
-                abi.encodeWithSelector(hookSelector, sender, key, params, delta, hookData)
-            );
-            if (success && returnData.length > 0) {
-                (bytes4 returnSelector, int128 hookReturn) = abi.decode(returnData, (bytes4, int128));
-                return (returnSelector, hookReturn);
-            }
-        }
-        
-        return (BaseHook.afterSwap.selector, 0);
-    }
-
-    function _beforeAddLiquidity(
-        address sender,
-        PoolKey calldata key,
-        ModifyLiquidityParams calldata params,
-        bytes calldata hookData
-    ) internal override returns (bytes4) {
-        bytes4 hookSelector = IHooks.beforeAddLiquidity.selector;
-        address facet = _getFacet(hookSelector);
-        
-        if (facet != address(0)) {
-            (bool success, bytes memory returnData) = facet.delegatecall(
-                abi.encodeWithSelector(hookSelector, sender, key, params, hookData)
-            );
-            if (success && returnData.length > 0) {
-                return abi.decode(returnData, (bytes4));
-            }
-        }
-        
-        return BaseHook.beforeAddLiquidity.selector;
-    }
-
-    function _afterAddLiquidity(
-        address sender,
-        PoolKey calldata key,
-        ModifyLiquidityParams calldata params,
-        BalanceDelta delta0,
-        BalanceDelta delta1,
-        bytes calldata hookData
-    ) internal override returns (bytes4, BalanceDelta) {
-        bytes4 hookSelector = IHooks.afterAddLiquidity.selector;
-        address facet = _getFacet(hookSelector);
-        
-        if (facet != address(0)) {
-            (bool success, bytes memory returnData) = facet.delegatecall(
-                abi.encodeWithSelector(hookSelector, sender, key, params, delta0, delta1, hookData)
-            );
-            if (success && returnData.length > 0) {
-                (bytes4 returnSelector, BalanceDelta hookReturn) = abi.decode(returnData, (bytes4, BalanceDelta));
-                return (returnSelector, hookReturn);
-            }
-        }
-        
-        return (BaseHook.afterAddLiquidity.selector, BalanceDelta.wrap(0));
-    }
-
-    function _beforeRemoveLiquidity(
-        address sender,
-        PoolKey calldata key,
-        ModifyLiquidityParams calldata params,
-        bytes calldata hookData
-    ) internal override returns (bytes4) {
-        bytes4 hookSelector = IHooks.beforeRemoveLiquidity.selector;
-        address facet = _getFacet(hookSelector);
-        
-        if (facet != address(0)) {
-            (bool success, bytes memory returnData) = facet.delegatecall(
-                abi.encodeWithSelector(hookSelector, sender, key, params, hookData)
-            );
-            if (success && returnData.length > 0) {
-                return abi.decode(returnData, (bytes4));
-            }
-        }
-        
-        return BaseHook.beforeRemoveLiquidity.selector;
-    }
-
-    function _afterRemoveLiquidity(
-        address sender,
-        PoolKey calldata key,
-        ModifyLiquidityParams calldata params,
-        BalanceDelta delta0,
-        BalanceDelta delta1,
-        bytes calldata hookData
-    ) internal override returns (bytes4, BalanceDelta) {
-        bytes4 hookSelector = IHooks.afterRemoveLiquidity.selector;
-        address facet = _getFacet(hookSelector);
-        
-        if (facet != address(0)) {
-            (bool success, bytes memory returnData) = facet.delegatecall(
-                abi.encodeWithSelector(hookSelector, sender, key, params, delta0, delta1, hookData)
-            );
-            if (success && returnData.length > 0) {
-                (bytes4 returnSelector, BalanceDelta hookReturn) = abi.decode(returnData, (bytes4, BalanceDelta));
-                return (returnSelector, hookReturn);
-            }
-        }
-        
-        return (BaseHook.afterRemoveLiquidity.selector, BalanceDelta.wrap(0));
-    }
-
-    /// @notice Get facet address for a function selector
-    /// @param selector Function selector to look up
-    /// @return facet Address of facet implementing this selector, or address(0) if none
-    function _getFacet(bytes4 selector) internal view returns (address facet) {
-        LibDiamond.DiamondStorage storage ds = LibDiamond.diamondStorage();
-        facet = ds.selectorToFacetAndPosition[selector].facetAddress;
-    }
-
-    /// @notice Fallback function for diamond proxy pattern
-    /// @dev Routes calls to facets via delegatecall
-    fallback() external payable {
-        LibDiamond.DiamondStorage storage ds;
-        bytes32 position = LibDiamond.DIAMOND_STORAGE_POSITION;
-        assembly {
-            ds.slot := position
-        }
-        
-        address facet = ds.selectorToFacetAndPosition[msg.sig].facetAddress;
-        if (facet == address(0)) {
-            revert FunctionNotFound(msg.sig);
-        }
-        
-        assembly {
-            calldatacopy(0, 0, calldatasize())
-            let result := delegatecall(gas(), facet, 0, calldatasize(), 0, 0)
-            returndatacopy(0, 0, returndatasize())
-            switch result
-            case 0 {
-                revert(0, returndatasize())
-            }
-            default {
-                return(0, returndatasize())
-            }
-        }
-    }
-
-    receive() external payable {}
+    ) external returns (bytes4 selector, int128 hookDeltaUnspecified);
 }
-    
+
+interface IBeforeAddLiquidityFacet {
+    function beforeAddLiquidity(
+        address sender,
+        PoolKey calldata key,
+        ModifyLiquidityParams calldata params,
+        bytes calldata hookData
+    ) external returns (bytes4 selector);
+}
+
+interface IAfterAddLiquidityFacet {
+    /// @param delta        principal owed for the liquidity added
+    /// @param feesAccrued  fees accrued to the position and folded into the delta
+    /// @return selector must be IHooks.afterAddLiquidity.selector
+    /// @return hookDelta amount the hook claims (needs afterAddLiquidityReturnDelta flag, else 0)
+    function afterAddLiquidity(
+        address sender,
+        PoolKey calldata key,
+        ModifyLiquidityParams calldata params,
+        BalanceDelta delta,
+        BalanceDelta feesAccrued,
+        bytes calldata hookData
+    ) external returns (bytes4 selector, BalanceDelta hookDelta);
+}
+
+interface IBeforeRemoveLiquidityFacet {
+    function beforeRemoveLiquidity(
+        address sender,
+        PoolKey calldata key,
+        ModifyLiquidityParams calldata params,
+        bytes calldata hookData
+    ) external returns (bytes4 selector);
+}
+
+interface IAfterRemoveLiquidityFacet {
+    function afterRemoveLiquidity(
+        address sender,
+        PoolKey calldata key,
+        ModifyLiquidityParams calldata params,
+        BalanceDelta delta,
+        BalanceDelta feesAccrued,
+        bytes calldata hookData
+    ) external returns (bytes4 selector, BalanceDelta hookDelta);
+}
+
+/// @notice All six callbacks HookDiamond currently routes. Inherit only if you implement all of them.
+interface IHookFacet is
+    IBeforeSwapFacet,
+    IAfterSwapFacet,
+    IBeforeAddLiquidityFacet,
+    IAfterAddLiquidityFacet,
+    IBeforeRemoveLiquidityFacet,
+    IAfterRemoveLiquidityFacet
+{}

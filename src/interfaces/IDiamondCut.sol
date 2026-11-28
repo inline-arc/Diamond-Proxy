@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.28;
+pragma solidity ^0.8.26;
 
 /// @title IDiamondCut: EIP-2535 Diamond Cut Interface
 /// @notice Add, replace, or remove facet selectors on a Diamond proxy
